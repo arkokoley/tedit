@@ -8,6 +8,7 @@
 #include <fstream>
 #include <string.h>
 #include <conio.h>
+#include <signal.h>
 #define c 80
 #define l 25
 
@@ -329,13 +330,30 @@ struct editor {
 	struct editor *prev; // Previous editor
 
 	char filename[80];
-	editor() { strcpy(filename, "Untitled.txt");}
 	void delete_editor();
 	int new_file(char *filename);
 	int load_file(char *file);
 	int save_file();
 	int text_length();
-
+	char* text_ptr(int);
+	void move_gap(int,int);
+	void close_gap();
+	int get(int);
+	int copy(char*, int,int);
+	void replace(int,int,char*,int,int);
+	void insert(int,char*, int);
+	void erase_section(int,int);
+	int line_length(int);
+	int next_line(int);
+	int prev_line(int);
+	int column(int,int);
+	void moveto(int, int);
+	int get_selection(int*, int*);
+	int get_selected_text(char*, int);
+	int erase_selection();
+	void update_selection(int);
+	int line_start(int);
+	void select_all();
 };
 
 struct env {
@@ -359,50 +377,47 @@ struct env {
 //
 
 struct editor *create_editor(struct env *env) {
-	struct editor *ed = new (struct editor);
-	memset(ed, 0, sizeof(struct editor));
-	if (env->current) {
-		ed->next = env->current->next;
-		ed->prev = env->current;
-		env->current->next->prev = ed;
-		env->current->next = ed;
-	} else {
-		ed->next = ed->prev = ed;
-	}
-	ed->env = env;
-	env->current = ed;
-	return ed;
+  struct editor *ed = (struct editor *) malloc(sizeof(struct editor));
+  memset(ed, 0, sizeof(struct editor));
+  if (env->current) {
+    ed->next = env->current->next;
+    ed->prev = env->current;
+    env->current->next->prev = ed;
+    env->current->next = ed;
+  } else {
+    ed->next = ed->prev = ed;
+  }
+  ed->env = env;
+  env->current = ed;
+  return ed;
 }
 
-void editor::delete_editor() {
-	if (next == ed) {
-		env->current = NULL;
-	} else {
-		ed->env->current = ed->prev;
-	}
-	next->prev = prev;
-	prev->next = next;
-	if (start)
-		free(start);
-	free();
+void delete_editor(struct editor *ed) {
+  if (ed->next == ed) {
+    ed->env->current = NULL;
+  } else {
+    ed->env->current = ed->prev;
+  }
+  ed->next->prev = ed->prev;
+  ed->prev->next = ed->next;
+  if (ed->start) free(ed->start);
+  clear_undo(ed);
+  free(ed);
 }
 
 struct editor *find_editor(struct env *env, char *filename) {
-	char fn[FILENAME_MAX];
-	struct editor *ed = env->current;
-	struct editor *start = ed;
+  char fn[FILENAME_MAX];
+  struct editor *ed = env->current;
+  struct editor *start = ed;
+  
+  if (!realpath(filename, fn)) strcpy(fn, filename);
 
-	//if (!filename, fn))
-		strcpy(fn, filename);
-
-	do {
-		if (strcmp(fn, ed->filename) == 0)
-			return ed;
-		ed = ed->next;
-	} while (ed != start);
-	return NULL;
+  do {
+    if (strcmp(fn, ed->filename) == 0) return ed;
+    ed = ed->next;
+  } while (ed != start);
+  return NULL;  
 }
-
 int editor::new_file(char *file) {
 	if (*filename) {
 		strcpy(filename, file);
@@ -429,7 +444,7 @@ int editor::load_file(char *file) {
 	struct stat statbuf;
 	int length;
 
-	//if (!realpath(filename, ed->filename))
+	//if (!realpath(filename, filename))
 	//	return -1;
 	ifstream f(filename);
 	if (!f)
@@ -445,7 +460,7 @@ int editor::load_file(char *file) {
 #ifdef DEBUG
 	memset(start, 0, length + MINEXTEND);
 #endif
-//	if (f.read(ed->start, length) != length)
+//	if (f.read(start, length) != length)
 //		goto err;
 
 	gap = start + length;
@@ -463,7 +478,7 @@ int editor::load_file(char *file) {
 	return -1;
 }
 
-int save_file() {
+int editor::save_file() {
 	fstream f;
 
 	f.open(filename);
@@ -489,134 +504,133 @@ int editor::text_length() {
 	return (gap - start) + (end - rest);
 }
 
- char *text_ptr(struct editor *ed, int pos) {
-	 char *p = ed->start + pos;
-	if (p >= ed->gap)
-		p += (ed->rest - ed->gap);
+ char *editor::text_ptr(int pos) {
+	 char *p = start + pos;
+	if (p >= gap)
+		p += (rest - gap);
 	return p;
 }
 
-void move_gap(struct editor *ed, int pos, int minsize) {
-	int gapsize = ed->rest - ed->gap;
-	 char *p = text_ptr(ed, pos);
+void editor::move_gap(int pos, int minsize) {
+	int gapsize = rest - gap;
+	 char *p = text_ptr(pos);
 	if (minsize < 0)
 		minsize = 0;
 
 	if (minsize <= gapsize) {
-		if (p != ed->rest) {
-			if (p < ed->gap) {
-				memmove(p + gapsize, p, ed->gap - p);
+		if (p != rest) {
+			if (p < gap) {
+				memmove(p + gapsize, p, gap - p);
 			} else {
-				memmove(ed->gap, ed->rest, p - ed->rest);
+				memmove(gap, rest, p - rest);
 			}
-			ed->gap = ed->start + pos;
-			ed->rest = ed->gap + gapsize;
+			gap = start + pos;
+			rest = gap + gapsize;
 		}
 	} else {
 		int newsize;
-		 char *start;
-		 char *gap;
-		 char *rest;
-		 char *end;
+		 char *newstart;
+		 char *newgap;
+		 char *newrest;
+		 char *newend;
 
 		if (gapsize + MINEXTEND > minsize)
 			minsize = gapsize + MINEXTEND;
-		newsize = (ed->end - ed->start) - gapsize + minsize;
+		newsize = (end - start) - gapsize + minsize;
 		start = ( char *) malloc(newsize); // TODO check for out of memory
 		gap = start + pos;
 		rest = gap + minsize;
 		end = start + newsize;
 
-		if (p < ed->gap) {
-			memcpy(start, ed->start, pos);
-			memcpy(rest, p, ed->gap - p);
-			memcpy(end - (ed->end - ed->rest), ed->rest, ed->end - ed->rest);
+		if (p < gap) {
+			memcpy(newstart, start, pos);
+			memcpy(newrest, p, gap - p);
+			memcpy(newend - (end - rest), rest, end - rest);
 		} else {
-			memcpy(start, ed->start, ed->gap - ed->start);
-			memcpy(start + (ed->gap - ed->start), ed->rest, p - ed->rest);
-			memcpy(rest, p, ed->end - p);
+			memcpy(newstart, start, gap - start);
+			memcpy(newstart + (gap - start), rest, p - rest);
+			memcpy(newrest, p, end - p);
 		}
 
-		free(ed->start);
-		ed->start = start;
-		ed->gap = gap;
-		ed->rest = rest;
-		ed->end = end;
+		free(start);
+		start = newstart;
+		gap = newgap;
+		rest = newrest;
+		end = newend;
 	}
 
 #ifdef DEBUG
-	memset(ed->gap, 0, ed->rest - ed->gap);
+	memset(gap, 0, rest - gap);
 #endif
 }
 
-void close_gap(struct editor *ed) {
-	int len = text_length(ed);
-	move_gap(ed, len, 1);
-	ed->start[len] = 0;
+void editor::close_gap() {
+	int len = text_length();
+	move_gap( len, 1);
+	start[len] = 0;
 }
 
-int get(struct editor *ed, int pos) {
-	 char *p = text_ptr(ed, pos);
-	if (p >= ed->end)
+int editor::get( int pos) {
+	 char *p = text_ptr( pos);
+	if (p >= end)
 		return -1;
 	return *p;
 }
 
-int copy(struct editor *ed,  char *buf, int pos, int len) {
+int editor::copy(char *buf, int pos, int len) {
 	 char *bufptr = buf;
-	 char *p = ed->start + pos;
-	if (p >= ed->gap)
-		p += (ed->rest - ed->gap);
+	 char *p = start + pos;
+	if (p >= gap)
+		p += (rest - gap);
 
 	while (len > 0) {
-		if (p == ed->end)
+		if (p == end)
 			break;
 		*bufptr++ = *p;
 		len--;
-		if (++p == ed->gap)
-			p = ed->rest;
+		if (++p == gap)
+			p = rest;
 	}
 
 	return bufptr - buf;
 }
 
-void replace(struct editor *ed, int pos, int len,  char *buf,
-		int bufsize, int doundo) {
-	 char *p = ed->start + pos;
+void editor::replace(int pos, int len,  char *buf, int bufsize, int doundo) {
+	 char *p = start + pos;
 
-	if (bufsize == 0 && p <= ed->gap && p + len >= ed->gap) {
+	if (bufsize == 0 && p <= gap && p + len >= gap) {
 		// Handle deletions at the edges of the gap
-		ed->rest += len - (ed->gap - p);
-		ed->gap = p;
+		rest += len - (gap - p);
+		gap = p;
 	} else {
 		// Move the gap
-		move_gap(ed, pos + len, bufsize - len);
+		move_gap(pos + len, bufsize - len);
 
 		// Replace contents
-		memcpy(ed->start + pos, buf, bufsize);
-		ed->gap = ed->start + pos + bufsize;
+		memcpy(start + pos, buf, bufsize);
+		gap = start + pos + bufsize;
 	}
 
 	// Mark buffer as dirty
-	ed->dirty = 1;
+	dirty = 1;
 }
 
-void insert(struct editor *ed, int pos,  char *buf, int bufsize) {
-	replace(ed, pos, 0, buf, bufsize, 1);
+void editor::insert( int pos,  char *buf, int bufsize) {
+	replace(pos, 0, buf, bufsize, 1);
 }
 
-void erase_section(struct editor *ed, int pos, int len) {
-	replace(ed, pos, len, NULL, 0, 1);
+void editor::erase_section( int pos, int len) {
+	replace( pos, len, NULL, 0, 1);
 }
 
 //
 // Navigation functions
 //
 
-int line_length(struct editor *ed, int linepos) {
+int editor::line_length( int linepos) {
 	int pos = linepos;
 	while (1) {
-		int ch = get(ed, pos);
+		int ch = get( pos);
 		if (ch < 0 || ch == '\n' || ch == '\r')
 			break;
 		pos++;
@@ -625,11 +639,11 @@ int line_length(struct editor *ed, int linepos) {
 	return pos - linepos;
 }
 
-int line_start(struct editor *ed, int pos) {
+int editor::line_start( int pos) {
 	while (1) {
 		if (pos == 0)
 			break;
-		if (get(ed, pos - 1) == '\n')
+		if (get(pos - 1) == '\n')
 			break;
 		pos--;
 	}
@@ -637,9 +651,9 @@ int line_start(struct editor *ed, int pos) {
 	return pos;
 }
 
-int next_line(struct editor *ed, int pos) {
+int editor::next_line(int pos) {
 	while (1) {
-		int ch = get(ed, pos);
+		int ch = get( pos);
 		if (ch < 0)
 			return -1;
 		pos++;
@@ -648,18 +662,18 @@ int next_line(struct editor *ed, int pos) {
 	}
 }
 
-int prev_line(struct editor *ed, int pos) {
+int editor::prev_line( int pos) {
 	if (pos == 0)
 		return -1;
 
 	while (pos > 0) {
-		int ch = get(ed, --pos);
+		int ch = get(--pos);
 		if (ch == '\n')
 			break;
 	}
 
 	while (pos > 0) {
-		int ch = get(ed, --pos);
+		int ch = get(--pos);
 		if (ch == '\n')
 			return pos + 1;
 	}
@@ -667,11 +681,11 @@ int prev_line(struct editor *ed, int pos) {
 	return 0;
 }
 
-int column(struct editor *ed, int linepos, int col) {
-	 char *p = text_ptr(ed, linepos);
+int editor::column(int linepos, int col) {
+	 char *p = text_ptr( linepos);
 	int co = 0;
 	while (col > 0) {
-		if (p == ed->end)
+		if (p == end)
 			break;
 		if (*p == '\t') {
 			int spaces = TABSIZE - co % TABSIZE;
@@ -680,47 +694,47 @@ int column(struct editor *ed, int linepos, int col) {
 			co++;
 		}
 		col--;
-		if (++p == ed->gap)
-			p = ed->rest;
+		if (++p == gap)
+			p = rest;
 	}
 	return co;
 }
 
-void moveto(struct editor *ed, int pos, int center) {
+void editor::moveto(int pos, int center) {
 	int scroll = 0;
 	for (;;) {
-		int cur = ed->linepos + ed->col;
+		int cur = linepos + col;
 		if (pos < cur) {
-			if (pos >= ed->linepos) {
-				ed->col = pos - ed->linepos;
+			if (pos >= linepos) {
+				col = pos - linepos;
 			} else {
-				ed->col = 0;
-				ed->linepos = prev_line(ed, ed->linepos);
-				ed->line--;
+				col = 0;
+				linepos = prev_line(linepos);
+				line--;
 
-				if (ed->topline > ed->line) {
-					ed->toppos = ed->linepos;
-					ed->topline--;
-					ed->refresh = 1;
+				if (topline > line) {
+					toppos = linepos;
+					topline--;
+					refresh = 1;
 					scroll = 1;
 				}
 			}
 		} else if (pos > cur) {
-			int next = next_line(ed, ed->linepos);
+			int next = next_line(linepos);
 			if (next == -1) {
-				ed->col = text_length(ed) - ed->linepos;
+				col = text_length() - linepos;
 				break;
 			} else if (pos < next) {
-				ed->col = pos - ed->linepos;
+				col = pos - linepos;
 			} else {
-				ed->col = 0;
-				ed->linepos = next;
-				ed->line++;
+				col = 0;
+				linepos = next;
+				line++;
 
-				if (ed->line >= ed->topline + ed->env->lines) {
-					ed->toppos = next_line(ed, ed->toppos);
-					ed->topline++;
-					ed->refresh = 1;
+				if (line >= topline + env->lines) {
+					toppos = next_line(toppos);
+					topline++;
+					refresh = 1;
 					scroll = 1;
 				}
 			}
@@ -730,16 +744,16 @@ void moveto(struct editor *ed, int pos, int center) {
 	}
 
 	if (scroll && center) {
-		int tl = ed->line - ed->env->lines / 2;
+		int tl = line -= env->lines / 2;
 		if (tl < 0)
 			tl = 0;
 		for (;;) {
-			if (ed->topline > tl) {
-				ed->toppos = prev_line(ed, ed->toppos);
-				ed->topline--;
-			} else if (ed->topline < tl) {
-				ed->toppos = next_line(ed, ed->toppos);
-				ed->topline++;
+			if (topline > tl) {
+				toppos = prev_line(toppos);
+				topline--;
+			} else if (topline < tl) {
+				toppos = next_line(toppos);
+				topline++;
 			} else {
 				break;
 			}
@@ -751,67 +765,67 @@ void moveto(struct editor *ed, int pos, int center) {
 // Text selection
 //
 
-int get_selection(struct editor *ed, int *start, int *end) {
-	if (ed->anchor == -1) {
+int editor::get_selection(int *start, int *end) {
+	if (anchor == -1) {
 		*start = *end = -1;
 		return 0;
 	} else {
-		int pos = ed->linepos + ed->col;
-		if (pos == ed->anchor) {
+		int pos = linepos + col;
+		if (pos == anchor) {
 			*start = *end = -1;
 			return 0;
-		} else if (pos < ed->anchor) {
+		} else if (pos < anchor) {
 			*start = pos;
-			*end = ed->anchor;
+			*end = anchor;
 		} else {
-			*start = ed->anchor;
+			*start = anchor;
 			*end = pos;
 		}
 	}
 	return 1;
 }
 
-int get_selected_text(struct editor *ed, char *buffer, int size) {
+int editor::get_selected_text(char *buffer, int size) {
 	int selstart, selend, len;
 
-	if (!get_selection(ed, &selstart, &selend))
+	if (!get_selection(&selstart, &selend))
 		return 0;
 	len = selend - selstart;
 	if (len >= size)
 		return 0;
-	copy(ed, buffer, selstart, len);
+	copy(buffer, selstart, len);
 	buffer[len] = 0;
 	return len;
 }
 
-void update_selection(struct editor *ed, int select) {
+void editor::update_selection(int select) {
 	if (select) {
-		if (ed->anchor == -1)
-			ed->anchor = ed->linepos + ed->col;
-		ed->refresh = 1;
+		if (anchor == -1)
+			anchor = linepos + col;
+		refresh = 1;
 	} else {
-		if (ed->anchor != -1)
-			ed->refresh = 1;
-		ed->anchor = -1;
+		if (anchor != -1)
+			refresh = 1;
+		anchor = -1;
 	}
 }
 
-int erase_selection(struct editor *ed) {
+int editor::erase_selection() {
 	int selstart, selend;
 
-	if (!get_selection(ed, &selstart, &selend))
+	if (!get_selection( &selstart, &selend))
 		return 0;
-	moveto(ed, selstart, 0);
-	erase_section(ed, selstart, selend - selstart);
-	ed->anchor = -1;
-	ed->refresh = 1;
+	moveto(selstart, 0);
+	erase_section(selstart, selend - selstart);
+	anchor = -1;
+	refresh = 1;
 	return 1;
 }
 
-void select_all(struct editor *ed) {
-	ed->anchor = 0;
-	ed->refresh = 1;
-	moveto(ed, text_length(ed), 0);
+void editor::select_all() {
+	anchor = 0;
+	refresh = 1;
+	moveto(text_length(), 0);
 }
 
 
@@ -852,18 +866,18 @@ void gotoxy(int col, int line) {
 	outstr(buf);
 }
 
-int prompt(struct editor *ed, char *msg) {
+int editor::prompt( char *msg) {
 	int maxlen, len, ch;
-	char *buf = ed->env->linebuf;
+	char *buf = env->linebuf;
 
-	gotoxy(0, ed->env->lines);
+	gotoxy(0, env->lines);
 	outstr(STATUS_COLOR);
 	outstr(msg);
 	outstr(CLREOL);
 
 	len = 0;
-	maxlen = ed->env->cols - strlen(msg) - 1;
-	len = get_selected_text(ed, buf, maxlen);
+	maxlen = env->cols - strlen(msg) - 1;
+	len = get_selected_text( buf, maxlen);
 	outbuf(buf, len);
 
 	for (;;) {
@@ -895,11 +909,11 @@ int ask() {
 // Display functions
 //
 
-void display_message(struct editor *ed, char *fmt, ...) {
+void editor::display_message(char *fmt, ...) {
 	va_list args;
 
 	va_start(args, fmt);
-	gotoxy(0, ed->env->lines);
+	gotoxy(0, env->lines);
 	outstr(STATUS_COLOR);
 	vprintf(fmt, args);
 	outstr(CLREOL TEXT_COLOR);
@@ -907,15 +921,15 @@ void display_message(struct editor *ed, char *fmt, ...) {
 	va_end(args);
 }
 
-/*void draw_full_statusline(struct editor *ed) {
-	struct env *env = ed->env;
+void editor::draw_full_statusline() {
+	struct env *env = this->env;
 	int namewidth = env->cols - 19;
 
 	gotoxy(0, env->lines);
 	sprintf(env->linebuf,
 			STATUS_COLOR "%*.*s%c Ln %-6dCol %-4d" CLREOL TEXT_COLOR,
-			-namewidth, namewidth, ed->filename, ed->dirty ? '*' : ' ',
-			ed->line + 1, column(ed, ed->linepos, ed->col) + 1);
+			-namewidth, namewidth, filename, dirty ? '*' : ' ',
+			line + 1, column(linepos, col) + 1);
 	outstr(env->linebuf);
 #ifdef DEBUG
 	gotoxy(0, env->lines - 1);
@@ -926,20 +940,20 @@ void display_message(struct editor *ed, char *fmt, ...) {
 	outstr(env->linebuf);
 #endif
 }
-*/
-void display_line(struct editor *ed, int pos, int fullline) {
+
+void editor::display_line(int pos, int fullline) {
 	int hilite = 0;
 	int col = 0;
-	int margin = ed->margin;
-	int maxcol = ed->env->cols + margin;
-	char *bufptr = ed->env->linebuf;
-	 char *p = text_ptr(ed, pos);
+	int margin = margin;
+	int maxcol = env->cols + margin;
+	char *bufptr = env->linebuf;
+	 char *p = text_ptr( pos);
 	int selstart, selend, ch;
 	char *s;
 
-	get_selection(ed, &selstart, &selend);
+	get_selection(&selstart, &selend);
 	while (col < maxcol) {
-/*			if (margin == 0) {
+			if (margin == 0) {
 		if (!hilite && pos >= selstart && pos < selend) {
 				for (s = SELECT_COLOR; *s; s++)
 					*bufptr++ = *s;
@@ -950,8 +964,7 @@ void display_line(struct editor *ed, int pos, int fullline) {
 				hilite = 0;
 			}
 		}
-*/
-		if (p == ed->end)
+		if (p == end)
 			break;
 		ch = *p;
 		if (ch == '\r' || ch == '\n')
@@ -977,12 +990,12 @@ void display_line(struct editor *ed, int pos, int fullline) {
 			col++;
 		}
 
-		if (++p == ed->gap)
-			p = ed->rest;
+		if (++p == gap)
+			p = rest;
 		pos++;
 	}
 
-/*	if (hilite) {
+	if (hilite) {
 		while (col < maxcol) {
 			*bufptr++ = ' ';
 			col++;
@@ -1005,144 +1018,144 @@ void display_line(struct editor *ed, int pos, int fullline) {
 		for (s = TEXT_COLOR; *s; s++)
 			*bufptr++ = *s;
 	}
-*/
-	outbuf(ed->env->linebuf, bufptr - ed->env->linebuf);
+
+	outbuf(env->linebuf, bufptr - env->linebuf);
 }
 
-void update_line(struct editor *ed) {
-	gotoxy(0, ed->line - ed->topline);
-	display_line(ed, ed->linepos, 0);
+void editor::update_line() {
+	gotoxy(0, line - topline);
+	display_line(linepos, 0);
 }
 
-void draw_screen(struct editor *ed) {
+void editor::draw_screen() {
 	int pos;
 	int i;
 
 	gotoxy(0, 0);
 	outstr(TEXT_COLOR);
-	pos = ed->toppos;
-	for (i = 0; i < ed->env->lines; i++) {
+	pos = toppos;
+	for (i = 0; i < env->lines; i++) {
 		if (pos < 0) {
 			outstr(CLREOL "\r\n");
 		} else {
-			display_line(ed, pos, 1);
-			pos = next_line(ed, pos);
+			display_line( pos, 1);
+			pos = next_line( pos);
 		}
 	}
 }
 
-void position_cursor(struct editor *ed) {
-	int col = column(ed, ed->linepos, ed->col);
-	gotoxy(col - ed->margin, ed->line - ed->topline);
+void editor::position_cursor() {
+	int col = column(linepos, col);
+	gotoxy(col - margin, line - topline);
 }
 
 //
 // Cursor movement
 //
 
-void adjust(struct editor *ed) {
+void editor::adjust() {
 	int col;
-	int ll = line_length(ed, ed->linepos);
-	ed->col = ed->lastcol;
-	if (ed->col > ll)
-		ed->col = ll;
+	int ll = line_length(linepos);
+	col = lastcol;
+	if (col > ll)
+		col = ll;
 
-	col = column(ed, ed->linepos, ed->col);
-	while (col < ed->margin) {
-		ed->margin -= 4;
-		if (ed->margin < 0)
-			ed->margin = 0;
-		ed->refresh = 1;
+	col = column(linepos, col);
+	while (col < margin) {
+		margin -= 4;
+		if (margin < 0)
+			margin = 0;
+		refresh = 1;
 	}
 
-	while (col - ed->margin >= ed->env->cols) {
-		ed->margin += 4;
-		ed->refresh = 1;
+	while (col - margin >= env->cols) {
+		margin += 4;
+		refresh = 1;
 	}
 }
 
-void up(struct editor *ed, int select) {
-	int newpos = prev_line(ed, ed->linepos);
+void editor::up( int select) {
+	int newpos = prev_line(linepos);
 	if (newpos < 0)
 		return;
 
-	update_selection(ed, select);
+	update_selection( select);
 
-	ed->linepos = newpos;
-	ed->line--;
-	if (ed->line < ed->topline) {
-		ed->toppos = ed->linepos;
-		ed->topline = ed->line;
-		ed->refresh = 1;
+	linepos = newpos;
+	line--;
+	if (line < topline) {
+		toppos = linepos;
+		topline = line;
+		refresh = 1;
 	}
 
-	adjust(ed);
+	adjust();
 }
 
-void down(struct editor *ed, int select) {
-	int newpos = next_line(ed, ed->linepos);
+void editor::down( int select) {
+	int newpos = next_line(linepos);
 	if (newpos < 0)
 		return;
 
-	update_selection(ed, select);
+	update_selection(select);
 
-	ed->linepos = newpos;
-	ed->line++;
+	linepos = newpos;
+	line++;
 
-	if (ed->line >= ed->topline + ed->env->lines) {
-		ed->toppos = next_line(ed, ed->toppos);
-		ed->topline++;
-		ed->refresh = 1;
+	if (line >= topline + env->lines) {
+		toppos = next_line(toppos);
+		topline++;
+		refresh = 1;
 	}
 
-	adjust(ed);
+	adjust();
 }
 
-void left(struct editor *ed, int select) {
-	update_selection(ed, select);
-	if (ed->col > 0) {
-		ed->col--;
+void editor::left( int select) {
+	update_selection( select);
+	if (col > 0) {
+		col--;
 	} else {
-		int newpos = prev_line(ed, ed->linepos);
+		int newpos = prev_line(linepos);
 		if (newpos < 0)
 			return;
 
-		ed->col = line_length(ed, newpos);
-		ed->linepos = newpos;
-		ed->line--;
-		if (ed->line < ed->topline) {
-			ed->toppos = ed->linepos;
-			ed->topline = ed->line;
-			ed->refresh = 1;
+		col = line_length(newpos);
+		linepos = newpos;
+		line--;
+		if (line < topline) {
+			toppos = linepos;
+			topline = line;
+			refresh = 1;
 		}
 	}
 
-	ed->lastcol = ed->col;
-	adjust(ed);
+	lastcol = col;
+	adjust();
 }
 
-void right(struct editor *ed, int select) {
-	update_selection(ed, select);
-	if (ed->col < line_length(ed, ed->linepos)) {
-		ed->col++;
+void editor::right( int select) {
+	update_selection(select);
+	if (col < line_length(linepos)) {
+		col++;
 	} else {
-		int newpos = next_line(ed, ed->linepos);
+		int newpos = next_line(linepos);
 		if (newpos < 0)
 			return;
 
-		ed->col = 0;
-		ed->linepos = newpos;
-		ed->line++;
+		col = 0;
+		linepos = newpos;
+		line++;
 
-		if (ed->line >= ed->topline + ed->env->lines) {
-			ed->toppos = next_line(ed, ed->toppos);
-			ed->topline++;
-			ed->refresh = 1;
+		if (line >= topline + env->lines) {
+			toppos = next_line(toppos);
+			topline++;
+			refresh = 1;
 		}
 	}
 
-	ed->lastcol = ed->col;
-	adjust(ed);
+	lastcol =col;
+	adjust();
 }
 
 int wordchar(int ch) {
@@ -1151,14 +1164,14 @@ int wordchar(int ch) {
 		|| (ch >= '0' && ch <= '9');
 }
 
-void wordleft(struct editor *ed, int select) {
+void editor::wordleft( int select) {
 	int pos, phase;
 
-	update_selection(ed, select);
-	pos = ed->linepos + ed->col;
+	update_selection(select);
+	pos = linepos + col;
 	phase = 0;
 	while (pos > 0) {
-		int ch = get(ed, pos - 1);
+		int ch = get(pos - 1);
 		if (phase == 0) {
 			if (wordchar(ch))
 				phase = 1;
@@ -1168,29 +1181,29 @@ void wordleft(struct editor *ed, int select) {
 		}
 
 		pos--;
-		if (pos < ed->linepos) {
-			ed->linepos = prev_line(ed, ed->linepos);
-			ed->line--;
-			ed->refresh = 1;
+		if (pos < linepos) {
+			linepos = prev_line(linepos);
+			line--;
+			refresh = 1;
 		}
 	}
-	ed->col = pos - ed->linepos;
-	if (ed->line < ed->topline) {
-		ed->toppos = ed->linepos;
-		ed->topline = ed->line;
+	col = pos - linepos;
+	if (line < topline) {
+		toppos = linepos;
+		topline = line;
 	}
 
-	ed->lastcol = ed->col;
-	adjust(ed);
+	lastcol = col;
+	adjust();
 }
 
-void wordright(struct editor *ed, int select) {
+void editor::wordright(int select) {
 	int pos, end, phase, next;
 
-	update_selection(ed, select);
-	pos = ed->linepos + ed->col;
+	update_selection(select);
+	pos = linepos + col;
 	end = text_length(ed);
-	next = next_line(ed, ed->linepos);
+	next = next_line(ed, linepos);
 	phase = 0;
 	while (pos < end) {
 		int ch = get(ed, pos);
@@ -1204,132 +1217,132 @@ void wordright(struct editor *ed, int select) {
 
 		pos++;
 		if (pos == next) {
-			ed->linepos = next;
-			next = next_line(ed, ed->linepos);
-			ed->line++;
-			ed->refresh = 1;
+			linepos = next;
+			next = next_line(linepos);
+			line++;
+			refresh = 1;
 		}
 	}
-	ed->col = pos - ed->linepos;
-	if (ed->line >= ed->topline + ed->env->lines) {
-		ed->toppos = next_line(ed, ed->toppos);
-		ed->topline++;
+	col = pos - linepos;
+	if (line >= topline + env->lines) {
+		toppos = next_line(toppos);
+		topline++;
 	}
 
-	ed->lastcol = ed->col;
-	adjust(ed);
+	lastcol = col;
+	adjust();
 }
 
-void home(struct editor *ed, int select) {
-	update_selection(ed, select);
-	ed->col = ed->lastcol = 0;
-	adjust(ed);
+void editor::home( int select) {
+	update_selection( select);
+	col = lastcol = 0;
+	adjust();
 }
 
-void end(struct editor *ed, int select) {
-	update_selection(ed, select);
-	ed->col = ed->lastcol = line_length(ed, ed->linepos);
-	adjust(ed);
+void editor::endkey( int select) {
+	update_selection( select);
+	col = lastcol = line_length(linepos);
+	adjust();
 }
 
-void top(struct editor *ed, int select) {
-	update_selection(ed, select);
-	ed->toppos = ed->topline = ed->margin = 0;
-	ed->linepos = ed->line = ed->col = ed->lastcol = 0;
-	ed->refresh = 1;
+void editor::top( int select) {
+	update_selection( select);
+	toppos = topline = margin = 0;
+	linepos = line = col = lastcol = 0;
+	refresh = 1;
 }
 
-void bottom(struct editor *ed, int select) {
-	update_selection(ed, select);
+void editor::bottom( int select) {
+	update_selection(select);
 	for (;;) {
-		int newpos = next_line(ed, ed->linepos);
+		int newpos = next_line(linepos);
 		if (newpos < 0)
 			break;
 
-		ed->linepos = newpos;
-		ed->line++;
+		linepos = newpos;
+		line++;
 
-		if (ed->line >= ed->topline + ed->env->lines) {
-			ed->toppos = next_line(ed, ed->toppos);
-			ed->topline++;
-			ed->refresh = 1;
+		if (line >= topline + env->lines) {
+			toppos = next_line(toppos);
+			topline++;
+			refresh = 1;
 		}
 	}
-	ed->col = ed->lastcol = line_length(ed, ed->linepos);
-	adjust(ed);
+	col = lastcol = line_length(linepos);
+	adjust();
 }
 
-void pageup(struct editor *ed, int select) {
+void editor::pageup( int select) {
 	int i;
 
-	update_selection(ed, select);
-	if (ed->line < ed->env->lines) {
-		ed->linepos = ed->toppos = 0;
-		ed->line = ed->topline = 0;
+	update_selection(select);
+	if (line < env->lines) {
+		linepos = toppos = 0;
+		line = topline = 0;
 	} else {
-		for (i = 0; i < ed->env->lines; i++) {
-			int newpos = prev_line(ed, ed->linepos);
+		for (i = 0; i < env->lines; i++) {
+			int newpos = prev_line(ed, linepos);
 			if (newpos < 0)
 				return;
 
-			ed->linepos = newpos;
-			ed->line--;
+			linepos = newpos;
+			line--;
 
-			if (ed->topline > 0) {
-				ed->toppos = prev_line(ed, ed->toppos);
-				ed->topline--;
+			if (topline > 0) {
+				toppos = prev_line(ed, toppos);
+				topline--;
 			}
 		}
 	}
 
-	ed->refresh = 1;
-	adjust(ed);
+	refresh = 1;
+	adjust();
 }
 
-void pagedown(struct editor *ed, int select) {
+void editor::pagedown(int select) {
 	int i;
 
-	update_selection(ed, select);
-	for (i = 0; i < ed->env->lines; i++) {
-		int newpos = next_line(ed, ed->linepos);
+	update_selection( select);
+	for (i = 0; i < env->lines; i++) {
+		int newpos = next_line(linepos);
 		if (newpos < 0)
 			break;
 
-		ed->linepos = newpos;
-		ed->line++;
+		linepos = newpos;
+		line++;
 
-		ed->toppos = next_line(ed, ed->toppos);
-		ed->topline++;
+		toppos = next_line( toppos);
+		topline++;
 	}
 
-	ed->refresh = 1;
-	adjust(ed);
+	refresh = 1;
+	adjust();
 }
 
 //
 // Text editing
 //
 
-void insert_char(struct editor *ed,  char ch) {
-	erase_selection(ed);
-	insert(ed, ed->linepos + ed->col, &ch, 1);
-	ed->col++;
-	ed->lastcol = ed->col;
-	adjust(ed);
-	if (!ed->refresh)
-		ed->lineupdate = 1;
+void editor::insert_char( char ch) {
+	erase_selection();
+	insert(linepos + col, &ch, 1);
+	col++;
+	lastcol = col;
+	adjust();
+	if (!refresh)
+		lineupdate = 1;
 }
 
-void newline(struct editor *ed) {
+void editor::newline() {
 	int p;
 	 char ch;
 
-	erase_selection(ed);
-	insert(ed, ed->linepos + ed->col, NEW_LINE, 1);
-	ed->col = ed->lastcol = 0;
-	ed->line++;
-	p = ed->linepos;
-	ed->linepos = next_line(ed, ed->linepos);
+	erase_selection();
+	insert(linepos + col, NEW_LINE, 1);
+	col = lastcol = 0;
+	line++;
+	p = linepos;
+	linepos = next_line(linepos);
 
 	// This causes whitespace to be copied over to new lines.
 	// Causes issues if pasting text in, so disabled for now.
@@ -1337,78 +1350,78 @@ void newline(struct editor *ed) {
 	for (;;) {
 		ch = get(ed, p++);
 		if (ch == ' ' || ch == '\t') {
-			insert(ed, ed->linepos + ed->col, &ch, 1);
-			ed->col++;
+			insert(ed, linepos + col, &ch, 1);
+			col++;
 		} else {
 			break;
 		}
 	}
 	*/
 
-	ed->lastcol = ed->col;
+	lastcol = col;
 
-	ed->refresh = 1;
+	refresh = 1;
 
-	if (ed->line >= ed->topline + ed->env->lines) {
-		ed->toppos = next_line(ed, ed->toppos);
-		ed->topline++;
-		ed->refresh = 1;
+	if (line >= topline + env->lines) {
+		toppos = next_line(toppos);
+		topline++;
+		refresh = 1;
 	}
 
-	adjust(ed);
+	adjust();
 }
 
-void backspace(struct editor *ed) {
-	if (erase_selection(ed))
+void editor::backspace() {
+	if (erase_selection())
 		return;
-	if (ed->linepos + ed->col == 0)
+	if (linepos + col == 0)
 		return;
-	if (ed->col == 0) {
-		int pos = ed->linepos;
-		erase_section(ed, --pos, 1);
-		if (get(ed, pos - 1) == '\r')
-			erase_section(ed, --pos, 1);
+	if (col == 0) {
+		int pos = linepos;
+		erase_section(--pos, 1);
+		if (get( pos - 1) == '\r')
+			erase_section( --pos, 1);
 
-		ed->line--;
-		ed->linepos = line_start(ed, pos);
-		ed->col = pos - ed->linepos;
-		ed->refresh = 1;
+		line--;
+		linepos = line_start( pos);
+		col = pos - linepos;
+		refresh = 1;
 
-		if (ed->line < ed->topline) {
-			ed->toppos = ed->linepos;
-			ed->topline = ed->line;
+		if (line < topline) {
+			toppos = linepos;
+			topline = line;
 		}
 	} else {
-		ed->col--;
-		erase_section(ed, ed->linepos + ed->col, 1);
-		ed->lineupdate = 1;
+		col--;
+		erase_section( linepos + col, 1);
+		lineupdate = 1;
 	}
 
-	ed->lastcol = ed->col;
-	adjust(ed);
+	lastcol = col;
+	adjust();
 }
 
-void del(struct editor *ed) {
+void editor::del() {
 	int pos, ch;
 
-	if (erase_selection(ed))
+	if (erase_selection())
 		return;
-	pos = ed->linepos + ed->col;
-	ch = get(ed, pos);
+	pos = linepos + col;
+	ch = get( pos);
 	if (ch < 0)
 		return;
 
-	erase_section(ed, pos, 1);
+	erase_section(pos, 1);
 	if (ch == '\r') {
 		ch = get(ed, pos);
 		if (ch == '\n')
-			erase_section(ed, pos, 1);
+			erase_section( pos, 1);
 	}
 
 	if (ch == '\n') {
-		ed->refresh = 1;
+		refresh = 1;
 	} else {
-		ed->lineupdate = 1;
+		lineupdate = 1;
 	}
 }
 
@@ -1417,26 +1430,26 @@ void del(struct editor *ed) {
 // Clipboard
 //
 
-void copy_selection(struct editor *ed) {
+void editor::copy_selection() {
 	int selstart, selend;
 
-	if (!get_selection(ed, &selstart, &selend))
+	if (!get_selection( &selstart, &selend))
 		return;
-	ed->env->clipsize = selend - selstart;
-	//ed->env->clipboard = realloc(ed->env->clipboard,	ed->env->clipsize);
-	copy(ed, ed->env->clipboard, selstart, ed->env->clipsize);
+	env->clipsize = selend - selstart;
+	//env->clipboard = realloc(env->clipboard,	env->clipsize);
+	copy( env->clipboard, selstart, env->clipsize);
 }
 
-void cut_selection(struct editor *ed) {
-	copy_selection(ed);
-	erase_selection(ed);
+void editor::cut_selection() {
+	copy_selection();
+	erase_selection();
 }
 
-void paste_selection(struct editor *ed) {
-	erase_selection(ed);
-	insert(ed, ed->linepos + ed->col, ed->env->clipboard, ed->env->clipsize);
-	moveto(ed, ed->linepos + ed->col + ed->env->clipsize, 0);
-	ed->refresh = 1;
+void editor::paste_selection() {
+	erase_selection();
+	insert(linepos + col, env->clipboard, env->clipsize);
+	moveto(linepos + col + env->clipsize, 0);
+	refresh = 1;
 }
 
 //
@@ -1444,178 +1457,146 @@ void paste_selection(struct editor *ed) {
 //
 
 void open_editor(struct editor *ed) {
-	int rc;
-	char *filename;
-	struct env *env = ed->env;
+  int rc;
+  char *filename;
+  struct env *env = ed->env;
 
-	if (!prompt(ed, "Open file: ")) {
-		ed->refresh = 1;
-		return;
-	}
-	filename = ed->env->linebuf;
-
-	ed = find_editor(ed->env, filename);
-	if (ed) {
-		env->current = ed;
-	} else {
-		ed = create_editor(env);
-		rc = load_file(ed, filename);
-		if (rc < 0) {
-			display_message(ed, "Error %d opening %s (%s)", errno, filename,
-					strerror(errno));
-			//sleep(5);
-			delete_editor(ed);
-			ed = env->current;
-		}
-	}
-	ed->refresh = 1;
+  if (!prompt(ed, "Open file: ")) {
+    ed->refresh = 1;
+    return;
+  }
+  filename = ed->env->linebuf;
+  
+  ed = find_editor(ed->env, filename);
+  if (ed) {
+    env->current = ed;
+  } else {
+    ed = create_editor(env);
+    rc = load_file(ed, filename);
+    if (rc < 0) {
+      display_message(ed, "Error %d opening %s (%s)", errno, filename, strerror(errno));
+      sleep(5);
+      delete_editor(ed);
+      ed = env->current;
+    }
+  }
+  ed->refresh = 1;
 }
 
 void new_editor(struct editor *ed) {
-	ed = create_editor(ed->env);
-	new_file(ed, "");
-	ed->refresh = 1;
+  ed = create_editor(ed->env);
+  new_file(ed, "");
+  ed->refresh = 1;
 }
 
 void read_from_stdin(struct editor *ed) {
-	char buffer[512];
-	int n, pos;
+  char buffer[512];
+  int n, pos;
 
-	pos = 0;
-	while ((n = fread(buffer, 1, sizeof(buffer), stdin)) > 0) {
-		insert(ed, pos, buffer, n);
-		pos += n;
-	}
-	strcpy(ed->filename, "<stdin>");
-	ed->dirty = 0;
+  pos = 0;
+  while ((n = fread(buffer, 1, sizeof(buffer), stdin)) > 0) {
+    insert(ed, pos, buffer, n);
+    pos += n;
+  }
+  strcpy(ed->filename, "<stdin>");  
+  ed->newfile = 1;
+  ed->dirty = 0;
 }
 
 void save_editor(struct editor *ed) {
-	int rc;
+  int rc;
+  
+  if (!ed->dirty && !ed->newfile) return;
+  
+  if (ed->newfile) {
+    if (!prompt(ed, "Save as: ")) {
+      ed->refresh = 1;
+      return;
+    }
 
-	if (!ed->dirty && !ed->newfile)
-		return;
+    if (access(ed->env->linebuf, F_OK) == 0) {
+      display_message(ed, "Overwrite %s (y/n)? ", ed->env->linebuf);
+      if (!ask()) {
+        ed->refresh = 1;
+        return;
+      }
+    }
+    strcpy(ed->filename, ed->env->linebuf);
+    ed->newfile = 0;
+  }
 
-	if (ed->newfile) {
-		if (!prompt(ed, "Save as: ")) {
-			ed->refresh = 1;
-			return;
-		}
+  rc = save_file(ed);
+  if (rc < 0) {
+    display_message(ed, "Error %d saving document (%s)", errno, strerror(errno));
+    sleep(5);
+  }
 
-		if (access(ed->env->linebuf, F_OK) == 0) {
-			display_message(ed, "Overwrite %s (y/n)? ", ed->env->linebuf);
-			if (!ask()) {
-				ed->refresh = 1;
-				return;
-			}
-		}
-		strcpy(ed->filename, ed->env->linebuf);
-		ed->newfile = 0;
-	}
-
-	rc = save_file(ed);
-	if (rc < 0) {
-		display_message(ed, "Error %d saving document (%s)", errno,
-				strerror(errno));
-		//sleep(5);
-	}
-
-	ed->refresh = 1;
+  ed->refresh = 1;
 }
 
 void close_editor(struct editor *ed) {
-	struct env *env = ed->env;
+  struct env *env = ed->env;
+  
+  if (ed->dirty) {
+    display_message(ed, "Close %s without saving changes (y/n)? ", ed->filename);
+    if (!ask()) {
+      ed->refresh = 1;
+      return;
+    }
+  }
+  
+  delete_editor(ed);
 
-	if (ed->dirty) {
-		display_message(ed, "Close %s without saving changes (y/n)? ",
-				ed->filename);
-		if (!ask()) {
-			ed->refresh = 1;
-			return;
-		}
-	}
-
-	delete_editor(ed);
-
-	ed = env->current;
-	if (!ed) {
-		ed = create_editor(env);
-		new_file(ed, "");
-	}
-	ed->refresh = 1;
+  ed = env->current;
+  if (!ed) {
+    ed = create_editor(env);
+    new_file(ed, "");
+  }
+  ed->refresh = 1;
 }
 
-void pipe_command(struct editor *ed) {
-	FILE *f;
-	char buffer[512];
-	int n;
-	int pos;
-
-	if (!prompt(ed, "Command: ")) {
-		ed->refresh = 1;
-		return;
-	}
-
-	f = popen(ed->env->linebuf, "r");
-	if (!f) {
-		display_message(ed, "Error %d running command (%s)", errno,
-				strerror(errno));
-		//sleep(5);
-	} else {
-		erase_selection(ed);
-		pos = ed->linepos + ed->col;
-		while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) {
-			insert(ed, pos, buffer, n);
-			pos += n;
-		}
-		moveto(ed, pos, 0);
-		pclose(f);
-	}
-	ed->refresh = 1;
-}
-
-void find_text(struct editor *ed, int next) {
+void editor::find_text(int next) {
 	int slen;
 
 	if (!next) {
-		if (!prompt(ed, "Find: ")) {
-			ed->refresh = 1;
+		if (!prompt("Find: ")) {
+			refresh = 1;
 			return;
 		}
-		if (ed->env->search)
-			free(ed->env->search);
-		ed->env->search = strdup(ed->env->linebuf);
+		if (env->search)
+			free(env->search);
+		env->search = strdup(env->linebuf);
 	}
 
-	if (!ed->env->search)
+	if (!env->search)
 		return;
-	slen = strlen(ed->env->search);
+	slen = strlen(env->search);
 	if (slen > 0) {
 		 char *match;
 
-		close_gap(ed);
-		match = strstr(ed->start + ed->linepos + ed->col, ed->env->search);
+		close_gap();
+		match = strstr(start + linepos + col, env->search);
 		if (match != NULL) {
-			int pos = match - ed->start;
-			ed->anchor = pos;
-			moveto(ed, pos + slen, 1);
+			int pos = match - start;
+			anchor = pos;
+			moveto(pos + slen, 1);
 		} else {
 			outch('\007');
 		}
 	}
-	ed->refresh = 1;
+	refresh = 1;
 }
 
-void goto_line(struct editor *ed) {
+void editor::goto_line() {
 	int lineno, li, pos;
 
-	ed->anchor = -1;
-	if (prompt(ed, "Goto line: ")) {
-		lineno = atoi(ed->env->linebuf);
+	anchor = -1;
+	if (prompt("Goto line: ")) {
+		lineno = atoi(env->linebuf);
 		if (lineno > 0) {
 			pos = 0;
 			for (li = 0; li < lineno - 1; li++) {
-				pos = next_line(ed, pos);
+				pos = next_line(pos);
 				if (pos < 0)
 					break;
 			}
@@ -1624,114 +1605,103 @@ void goto_line(struct editor *ed) {
 		}
 
 		if (pos >= 0) {
-			moveto(ed, pos, 1);
+			moveto(pos, 1);
 		} else {
 			outch('\007');
 		}
 	}
-	ed->refresh = 1;
+	refresh = 1;
 }
 
 struct editor *next_file(struct editor *ed) {
-	ed = ed->env->current = ed->next;
-	ed->refresh = 1;
+	ed = env->current = next;
+	refresh = 1;
 	return ed;
 }
 
 struct editor *prev_file(struct editor *ed) {
-	ed = ed->env->current = ed->prev;
-	ed->refresh = 1;
+	ed = env->current = prev;
+	refresh = 1;
 	return ed;
 }
 
 void jump_to_editor(struct editor *ed) {
-	struct env *env = ed->env;
-	char filename[FILENAME_MAX];
-	int lineno = 0;
+  struct env *env = ed->env;
+  char filename[FILENAME_MAX];
+  int lineno = 0;
 
-	if (!get_selected_text(ed, filename, FILENAME_MAX)) {
-		int pos = ed->linepos + ed->col;
-		char *p = filename;
-		int left = FILENAME_MAX - 1;
-		while (left > 0) {
-			int ch = get(ed, pos);
-			if (ch < 0)
-				break;
-			if (strchr("!@\"'#%&()[]{}*?+:;\r\n\t ", ch))
-				break;
-			*p++ = ch;
-			left--;
-			pos++;
-		}
-		*p = 0;
+  if (!get_selected_text(ed, filename, FILENAME_MAX)) {
+    int pos = ed->linepos + ed->col;
+    char *p = filename;
+    int left = FILENAME_MAX - 1;
+    while (left > 0) {
+      int ch = get(ed, pos);
+      if (ch < 0) break;
+      if (strchr("!@\"'#%&()[]{}*?+:;\r\n\t ", ch)) break;
+      *p++ = ch;
+      left--;
+      pos++;
+    }
+    *p = 0;
 
-		if (get(ed, pos) == ':') {
-			pos++;
-			for (;;) {
-				int ch = get(ed, pos);
-				if (ch < 0)
-					break;
-				if (ch >= '0' && ch <= '9') {
-					lineno = lineno * 10 + (ch - '0');
-				} else {
-					break;
-				}
-				pos++;
-			}
-		}
-	}
-	if (!*filename)
-		return;
+    if (get(ed, pos) == ':') {
+      pos++;
+      for (;;) {
+        int ch = get(ed, pos);
+        if (ch < 0) break;
+        if (ch >= '0' && ch <= '9') {
+          lineno = lineno * 10 + (ch - '0');
+        } else {
+          break;
+        }
+        pos++;
+      }
+    }
+  }
+  if (!*filename) return;
+  
+  ed = find_editor(env, filename);
+  if (ed) {
+    env->current = ed;
+  } else {
+    ed = create_editor(env);
+    if (load_file(ed, filename) < 0) {
+      outch('\007');
+      delete_editor(ed);
+      ed = env->current;
+    }
+  }
+  
+  if (lineno > 0) {
+    int pos = 0;
+    while (--lineno > 0) {
+      pos = next_line(ed, pos);
+      if (pos < 0) break;
+    }
+    if (pos >= 0) moveto(ed, pos, 1);
+  }
 
-	ed = find_editor(env, filename);
-	if (ed) {
-		env->current = ed;
-	} else {
-		ed = create_editor(env);
-		if (load_file(ed, filename) < 0) {
-			outch('\007');
-			delete_editor(ed);
-			ed = env->current;
-		}
-	}
-
-	if (lineno > 0) {
-		int pos = 0;
-		while (--lineno > 0) {
-			pos = next_line(ed, pos);
-			if (pos < 0)
-				break;
-		}
-		if (pos >= 0)
-			moveto(ed, pos, 1);
-	}
-
-	ed->refresh = 1;
+  ed->refresh = 1;
 }
 
 void redraw_screen(struct editor *ed) {
-	get_console_size(ed->env);
-	draw_screen(ed);
-//	draw_full_statusline(ed);
-	position_cursor(ed);
-	fflush(stdout);
+  get_console_size(ed->env);
+  draw_screen(ed);
 }
 
 int quit(struct env *env) {
-	struct editor *ed = env->current;
-	struct editor *start = ed;
+  struct editor *ed = env->current;
+  struct editor *start = ed;
 
-	do {
-		if (ed->dirty) {
-			display_message(ed, "Close %s without saving changes (y/n)? ",
-					ed->filename);
-			if (!ask())
-				return 0;
-		}
-		ed = ed->next;
-	} while (ed != start);
+  do {
+    if (ed->dirty) {
+      display_message(ed, "Close %s without saving changes (y/n)? ", ed->filename);
+      if (!ask()) return 0;
+    }
+    ed = ed->next;
+  } while (ed != start);
 
-	return 1;
+  return 1;
 }
 
 void help(struct editor *ed) {
@@ -1776,155 +1746,155 @@ void help(struct editor *ed) {
 // Editor
 //
 
-void edit(struct editor *ed) {
+void editor::edit() {
 	int done = 0;
 	int key;
 
-	ed->refresh = 1;
+	refresh = 1;
 	while (!done) {
-		if (ed->refresh) {
-			draw_screen(ed);
-		//	draw_full_statusline(ed);
-			ed->refresh = 0;
-			ed->lineupdate = 0;
-		} else if (ed->lineupdate) {
-			update_line(ed);
-			ed->lineupdate = 0;
-//			draw_full_statusline(ed);
+		if (refresh) {
+			draw_screen();
+			draw_full_statusline();
+			refresh = 0;
+			lineupdate = 0;
+		} else if (lineupdate) {
+			update_line();
+			lineupdate = 0;
+			draw_full_statusline();
 		} else {
-//			draw_full_statusline(ed);
+			draw_full_statusline();
 		}
 
-		position_cursor(ed);
+		position_cursor();
 		fflush(stdout);
 		key = getkey();
 
 		if (key >= ' ' && key <= 0x7F) {
 #ifndef LESS
-			insert_char(ed, ( char) key);
+			insert_char(( char) key);
 #endif
 		} else {
 			switch (key) {
 			case KEY_F1:
-				help(ed);
+				help();
 				break;
 			case KEY_F3:
-				jump_to_editor(ed);
-				ed = ed->env->current;
+				jump_to_editor();
+				this = env->current;
 				break;
 			case KEY_F5:
-				redraw_screen(ed);
+				redraw_screen();
 				break;
 			case ctrl('u'):
-				jump_to_editor(ed);
-				ed = ed->env->current;
+				jump_to_editor();
+				this = env->current;
 				break;
 			case ctrl('y'):
-				help(ed);
+				help();
 				break;
 			case ctrl('t'):
-				top(ed, 0);
+				top(0);
 				break;
 			case ctrl('b'):
-				bottom(ed, 0);
+				bottom(0);
 				break;
 			case KEY_UP:
-				up(ed, 0);
+				up( 0);
 				break;
 			case KEY_DOWN:
-				down(ed, 0);
+				down( 0);
 				break;
 			case KEY_LEFT:
-				left(ed, 0);
+				left( 0);
 				break;
 			case KEY_RIGHT:
-				right(ed, 0);
+				right( 0);
 				break;
 			case KEY_HOME:
-				home(ed, 0);
+				home( 0);
 				break;
 			case KEY_END:
-				end(ed, 0);
+				end( 0);
 				break;
 			case KEY_PGUP:
-				pageup(ed, 0);
+				pageup( 0);
 				break;
 			case KEY_PGDN:
-				pagedown(ed, 0);
+				pagedown( 0);
 				break;
 
 			case KEY_CTRL_RIGHT:
-				wordright(ed, 0);
+				wordright( 0);
 				break;
 			case KEY_CTRL_LEFT:
-				wordleft(ed, 0);
+				wordleft( 0);
 				break;
 			case KEY_CTRL_HOME:
-				top(ed, 0);
+				top( 0);
 				break;
 			case KEY_CTRL_END:
-				bottom(ed, 0);
+				bottom( 0);
 				break;
 
 			case KEY_SHIFT_UP:
-				up(ed, 1);
+				up( 1);
 				break;
 			case KEY_SHIFT_DOWN:
-				down(ed, 1);
+				down( 1);
 				break;
 			case KEY_SHIFT_LEFT:
-				left(ed, 1);
+				left( 1);
 				break;
 			case KEY_SHIFT_RIGHT:
-				right(ed, 1);
+				right( 1);
 				break;
 			case KEY_SHIFT_PGUP:
-				pageup(ed, 1);
+				pageup( 1);
 				break;
 			case KEY_SHIFT_PGDN:
-				pagedown(ed, 1);
+				pagedown( 1);
 				break;
 			case KEY_SHIFT_HOME:
-				home(ed, 1);
+				home( 1);
 				break;
 			case KEY_SHIFT_END:
-				end(ed, 1);
+				end( 1);
 				break;
 
 			case KEY_SHIFT_CTRL_RIGHT:
-				wordright(ed, 1);
+				wordright( 1);
 				break;
 			case KEY_SHIFT_CTRL_LEFT:
-				wordleft(ed, 1);
+				wordleft( 1);
 				break;
 			case KEY_SHIFT_CTRL_HOME:
-				top(ed, 1);
+				top( 1);
 				break;
 			case KEY_SHIFT_CTRL_END:
-				bottom(ed, 1);
+				bottom( 1);
 				break;
 
 			case KEY_SHIFT_TAB:
-				ed = next_file(ed);
+				this = next_file(this);
 				break;
 			case KEY_CTRL_TAB:
-				ed = prev_file(ed);
+				this = prev_file(this);
 				break;
 
 			case ctrl('a'):
-				select_all(ed);
+				select_all();
 				break;
 			case ctrl('c'):
-				copy_selection(ed);
+				copy_selection();
 				break;
 			case ctrl('f'):
-				find_text(ed, 0);
+				find_text( 0);
 				break;
 			case ctrl('l'):
-				goto_line(ed);
+				goto_line();
 				break;
 			case ctrl('g'):
-				find_text(ed, 1);
+				find_text( 1);
 				break;
 			case ctrl('q'):
 				done = 1;
@@ -1933,34 +1903,34 @@ void edit(struct editor *ed) {
 				case KEY_ESC: done = 1; break;
 #else
 			case KEY_ENTER:
-				newline(ed);
+				newline();
 				break;
 			case KEY_BACKSPACE:
-				backspace(ed);
+				backspace();
 				break;
 			case KEY_DEL:
-				del(ed);
+				del();
 				break;
 			case KEY_TAB:
-				insert_char(ed, '\t');
+				insert_char('\t');
 				break;
 			case ctrl('x'):
-				cut_selection(ed);
+				cut_selection();
 				break;
 			case ctrl('v'):
-				paste_selection(ed);
+				paste_selection();
 				break;
 			case ctrl('o'):
 				open_editor(ed);
-				ed = ed->env->current;
+				ed = env->current;
 				break;
 			case ctrl('n'):
 				new_editor(ed);
-				ed = ed->env->current;
+				ed = env->current;
 				break;
 			case ctrl('w'):
 				close_editor(ed);
-				ed = ed->env->current;
+				ed = env->current;
 				break;
 			case ctrl('s'):
 				save_editor(ed);
@@ -1988,7 +1958,7 @@ int main() {
 	int rc;
 	int i;
 	char file[80];
-	//sigset_t blocked_sigmask, orig_sigmask;
+	sigset_t blocked_sigmask, orig_sigmask;
 
 	//struct termios tio;
 	//struct termios orig_tio;
@@ -2039,7 +2009,7 @@ int main() {
 		free(env.linebuf);
 
 	setbuf(stdout, NULL);
-	//sigprocmask(SIG_SETMASK, &orig_sigmask, NULL);
+	sigprocmask(SIG_SETMASK, &orig_sigmask, NULL);
 
 	// Close ncurses.
 	//endwin();
