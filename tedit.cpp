@@ -354,6 +354,9 @@ struct editor {
 	void update_selection(int);
 	int line_start(int);
 	void select_all();
+	int prompt(char*);
+	void display_message(char*);
+	void draw_full_statusline();
 };
 
 struct env {
@@ -401,7 +404,6 @@ void delete_editor(struct editor *ed) {
   ed->next->prev = ed->prev;
   ed->prev->next = ed->next;
   if (ed->start) free(ed->start);
-  clear_undo(ed);
   free(ed);
 }
 
